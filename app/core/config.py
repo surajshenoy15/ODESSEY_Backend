@@ -38,9 +38,10 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173,"
         "http://localhost:5174,"
         "http://127.0.0.1:5174"
+        "https://odessey-frontend.vercel.app"
     )
 
-    PUBLIC_APP_URL: str = "http://localhost:5173"
+    PUBLIC_APP_URL: str = "https://odessey-frontend.vercel.app"
     API_PUBLIC_URL: str = "https://odessey-backend.onrender.com"
 
     ALLOWED_PED_EMAIL_DOMAINS: str = ""
