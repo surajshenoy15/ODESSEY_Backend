@@ -39,6 +39,7 @@ class Settings(BaseSettings):
         "http://localhost:5174,"
         "http://127.0.0.1:5174"
         "https://odessey-frontend.vercel.app"
+        "https://odessey-admin-frontend.vercel.app"
     )
 
     PUBLIC_APP_URL: str = "https://odessey-frontend.vercel.app"
