@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     )
 
     PUBLIC_APP_URL: str = "http://localhost:5173"
-    API_PUBLIC_URL: str = "http://localhost:8000"
+    API_PUBLIC_URL: str = "https://odessey-backend.onrender.com"
 
     ALLOWED_PED_EMAIL_DOMAINS: str = ""
 
