@@ -39,6 +39,7 @@ from app.core.security import (
 
 from app.models.entities import (
     Admin,
+    AttendanceRecord,
     AuditLog,
     Certificate,
     CertificateTemplate,
@@ -217,6 +218,7 @@ async def dashboard(
                         Registration.id
                     )
                 ).where(
+                    Registration.status != 'CANCELLED',
                     *conditions
                 )
             )
@@ -768,6 +770,15 @@ async def registrations(
             Registration.status
             == status_filter
         )
+    else:
+        # Soft-deleted registrations stay in the database for
+        # audit/payment history, but are hidden from the normal
+        # operational list. Admins can explicitly filter by
+        # CANCELLED when they need to inspect removed records.
+        query = query.where(
+            Registration.status
+            != 'CANCELLED'
+        )
 
     if payment_status:
         query = query.where(
@@ -1074,6 +1085,151 @@ async def registration_detail(
             registration
             .attendance_confirmed_at,
     }
+
+
+# ============================================================
+# REMOVE REGISTRATION (SAFE SOFT DELETE)
+# ============================================================
+
+@router.delete(
+    '/registrations/{rid}',
+    response_model=MessageResponse,
+)
+async def delete_registration(
+    rid: str,
+
+    admin: Admin = Depends(
+        require_admin_roles(
+            'REGISTRATION_ADMIN'
+        )
+    ),
+
+    db: AsyncSession = Depends(
+        get_db
+    ),
+):
+    """
+    Remove a registration from active operations without
+    physically deleting payment/audit history.
+
+    The registration is moved to CANCELLED and every current QR
+    is revoked by clearing registration.qr_token.
+
+    Registrations that already have attendance or certificates
+    are protected from deletion because those records are part
+    of event-day / certification history.
+    """
+
+    registration = await db.scalar(
+        select(
+            Registration
+        )
+        .where(
+            Registration.id == rid
+        )
+    )
+
+    if not registration:
+        raise HTTPException(
+            status_code=404,
+            detail='Registration not found',
+        )
+
+    if registration.status == 'CANCELLED':
+        raise HTTPException(
+            status_code=409,
+            detail='Registration is already deleted',
+        )
+
+    attendance_count = int(
+        await db.scalar(
+            select(
+                func.count()
+            )
+            .select_from(
+                AttendanceRecord
+            )
+            .where(
+                AttendanceRecord.registration_id
+                == registration.id
+            )
+        )
+        or 0
+    )
+
+    certificate_count = int(
+        await db.scalar(
+            select(
+                func.count()
+            )
+            .select_from(
+                Certificate
+            )
+            .where(
+                Certificate.registration_id
+                == registration.id
+            )
+        )
+        or 0
+    )
+
+    if attendance_count or certificate_count:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                'message': (
+                    'This registration cannot be deleted because '
+                    'attendance or certificate history already exists.'
+                ),
+                'attendance_records': attendance_count,
+                'certificates': certificate_count,
+            },
+        )
+
+    previous_status = registration.status
+    previous_qr_active = bool(
+        registration.qr_token
+    )
+
+    registration.status = 'CANCELLED'
+
+    # Revokes the generic registration QR and every role-specific
+    # PED / Coach / Manager QR derived from the current master.
+    registration.qr_token = None
+
+    removal_note = (
+        'Registration removed from active records by admin.'
+    )
+
+    if registration.admin_note:
+        registration.admin_note = (
+            f'{registration.admin_note}\n\n{removal_note}'
+        )
+    else:
+        registration.admin_note = removal_note
+
+    await audit(
+        db,
+        'ADMIN',
+        admin.id,
+        'DELETE_REGISTRATION',
+        'REGISTRATION',
+        registration.id,
+        details={
+            'soft_delete': True,
+            'previous_status': previous_status,
+            'payment_status': registration.payment_status,
+            'qr_revoked': previous_qr_active,
+        },
+    )
+
+    await db.commit()
+
+    return MessageResponse(
+        message=(
+            'Registration deleted from active records successfully'
+        )
+    )
 
 
 # ============================================================

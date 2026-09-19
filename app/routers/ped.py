@@ -110,6 +110,7 @@ async def owned(
         .where(
             Registration.id == rid,
             Registration.ped_id == ped.id,
+            Registration.status != 'CANCELLED',
         )
     )
 
@@ -320,7 +321,10 @@ async def dashboard(
             )
             .where(
                 Registration.ped_id
-                == ped.id
+                == ped.id,
+
+                Registration.status
+                != 'CANCELLED'
             )
             .options(
                 selectinload(
@@ -614,7 +618,10 @@ async def registrations(
             )
             .where(
                 Registration.ped_id
-                == ped.id
+                == ped.id,
+
+                Registration.status
+                != 'CANCELLED'
             )
             .options(
                 selectinload(
@@ -1501,7 +1508,10 @@ async def fixtures(
             )
             .where(
                 Registration.ped_id
-                == ped.id
+                == ped.id,
+
+                Registration.status
+                != 'CANCELLED'
             )
         )
     ).all()
