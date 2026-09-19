@@ -1,19 +1,33 @@
+import hmac
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+)
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import decode_token
+
+from app.core.security import (
+    COORDINATOR_QR_ROLES,
+    coordinator_qr_matches,
+    decode_token,
+)
+
 from app.models.entities import (
     EventConfig,
     Fixture,
     LiveStream,
     Registration,
 )
+
 from app.services.helpers import qr_public_url
 from app.services.storage import storage
 
@@ -141,13 +155,19 @@ async def event_payload(
 
 @router.get('/events')
 async def events(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(
+        get_db
+    ),
 ):
     rows = (
         await db.scalars(
-            select(EventConfig)
+            select(
+                EventConfig
+            )
             .where(
-                EventConfig.is_active.is_(True)
+                EventConfig
+                .is_active
+                .is_(True)
             )
             .order_by(
                 EventConfig.event_type,
@@ -161,7 +181,9 @@ async def events(
 
     for event in rows:
         result.append(
-            await event_payload(event)
+            await event_payload(
+                event
+            )
         )
 
     return result
@@ -173,17 +195,26 @@ async def events(
 
 @router.get('/fixtures')
 async def fixtures(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(
+        get_db
+    ),
 ):
     rows = (
         await db.scalars(
-            select(Fixture)
+            select(
+                Fixture
+            )
             .where(
-                Fixture.status == 'PUBLISHED',
-                Fixture.visibility == 'PUBLIC',
+                Fixture.status
+                == 'PUBLISHED',
+
+                Fixture.visibility
+                == 'PUBLIC',
             )
             .order_by(
-                Fixture.published_at.desc()
+                Fixture
+                .published_at
+                .desc()
             )
         )
     ).all()
@@ -192,9 +223,13 @@ async def fixtures(
 
     for item in rows:
 
-        download_url = await safe_signed_url(
-            settings.SUPABASE_BUCKET_FIXTURES,
-            item.file_path,
+        download_url = (
+            await safe_signed_url(
+                settings
+                .SUPABASE_BUCKET_FIXTURES,
+
+                item.file_path,
+            )
         )
 
         result.append({
@@ -229,17 +264,26 @@ async def fixtures(
 
 @router.get('/live-streams')
 async def streams(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(
+        get_db
+    ),
 ):
     rows = (
         await db.scalars(
-            select(LiveStream)
+            select(
+                LiveStream
+            )
             .where(
-                LiveStream.visibility == 'PUBLIC',
-                LiveStream.status != 'OFFLINE',
+                LiveStream.visibility
+                == 'PUBLIC',
+
+                LiveStream.status
+                != 'OFFLINE',
             )
             .order_by(
-                LiveStream.scheduled_at.desc()
+                LiveStream
+                .scheduled_at
+                .desc()
             )
         )
     ).all()
@@ -273,90 +317,367 @@ async def streams(
 
 
 # ============================================================
+# COORDINATOR IDENTITY
+# ============================================================
+
+def _coordinator_identity(
+    registration: Registration,
+    coordinator_role: str,
+):
+    """
+    Resolve ONLY the coordinator represented by the QR.
+
+    Returns:
+
+        (
+            public coordinator data,
+            coordinator login email
+        )
+
+    The email is used internally ONLY for validating the
+    identity fingerprint stored inside the coordinator QR.
+
+    It is NEVER returned from the public endpoint.
+    """
+
+    if not registration.ped:
+        raise HTTPException(
+            status_code=
+                status.HTTP_409_CONFLICT,
+
+            detail=
+                'Coordinator information is unavailable',
+        )
+
+
+    role = (
+        str(
+            coordinator_role
+            or ''
+        )
+        .strip()
+        .upper()
+    )
+
+
+    if role not in COORDINATOR_QR_ROLES:
+        raise HTTPException(
+            status_code=
+                status.HTTP_400_BAD_REQUEST,
+
+            detail=
+                'Invalid coordinator QR role',
+        )
+
+
+    # ========================================================
+    # PED
+    # ========================================================
+
+    if role == 'PED':
+
+        name = (
+            registration
+            .ped
+            .name
+            or ''
+        ).strip()
+
+        email = (
+            registration
+            .ped
+            .official_email
+            or ''
+        ).strip().lower()
+
+
+        if not name or not email:
+            raise HTTPException(
+                status_code=
+                    status.HTTP_409_CONFLICT,
+
+                detail=
+                    'PED is no longer registered',
+            )
+
+
+        return (
+            {
+                'role':
+                    'PED',
+
+                'label':
+                    'PED',
+
+                'name':
+                    name,
+            },
+
+            email,
+        )
+
+
+    # ========================================================
+    # COACH
+    # ========================================================
+
+    if role == 'COACH':
+
+        name = (
+            registration
+            .ped
+            .coach_name
+            or ''
+        ).strip()
+
+        email = (
+            registration
+            .ped
+            .coach_email
+            or ''
+        ).strip().lower()
+
+
+        if not name or not email:
+            raise HTTPException(
+                status_code=
+                    status.HTTP_409_CONFLICT,
+
+                detail=
+                    'Coach is no longer registered',
+            )
+
+
+        return (
+            {
+                'role':
+                    'COACH',
+
+                'label':
+                    'Coach',
+
+                'name':
+                    name,
+            },
+
+            email,
+        )
+
+
+    # ========================================================
+    # MANAGER
+    # ========================================================
+
+    if role == 'MANAGER':
+
+        name = (
+            registration
+            .ped
+            .manager_name
+            or ''
+        ).strip()
+
+        email = (
+            registration
+            .ped
+            .manager_email
+            or ''
+        ).strip().lower()
+
+
+        if not name or not email:
+            raise HTTPException(
+                status_code=
+                    status.HTTP_409_CONFLICT,
+
+                detail=
+                    'Manager is no longer registered',
+            )
+
+
+        return (
+            {
+                'role':
+                    'MANAGER',
+
+                'label':
+                    'Manager',
+
+                'name':
+                    name,
+            },
+
+            email,
+        )
+
+
+    raise HTTPException(
+        status_code=
+            status.HTTP_400_BAD_REQUEST,
+
+        detail=
+            'Invalid coordinator QR role',
+    )
+
+
+# ============================================================
 # PUBLIC QR VERIFICATION
 # ============================================================
 
 @router.get('/qr/{token}')
 async def verify_qr(
     token: str,
-    db: AsyncSession = Depends(get_db),
+
+    db: AsyncSession = Depends(
+        get_db
+    ),
 ):
     """
-    Read-only QR landing data.
+    Public, read-only QR verification.
 
-    Only minimum event-day identity information
-    is returned publicly.
+    Supports:
 
-    Contact number, email and USN are intentionally
-    not exposed here.
+    1. registration_qr
 
-    Attendance mutation remains admin-authenticated.
+       Legacy/generic registration QR.
+
+    2. coordinator_qr
+
+       PED / Coach / Manager attendance QR.
+
+
+    SECURITY:
+
+    Public response NEVER includes:
+
+    - student names
+    - student photographs
+    - student USNs
+    - student email
+    - coordinator email
+    - coordinator phone
+    - other coordinator names
+
+    Coordinator QR validation checks:
+
+    1. JWT signature
+    2. token type
+    3. approved registration
+    4. current master registration QR
+    5. coordinator role
+    6. current coordinator identity/email
+
+    Student roster/photo verification remains available only
+    through the authenticated attendance admin endpoint.
     """
 
-    # --------------------------------------------------------
-    # Decode QR
-    # --------------------------------------------------------
+
+    # ========================================================
+    # DECODE TOKEN
+    # ========================================================
 
     try:
         payload = decode_token(
-            token,
-            'registration_qr',
+            token
         )
 
-    except Exception:
+    except HTTPException as exc:
         raise HTTPException(
-            status_code=400,
-            detail='Invalid or expired QR code',
+            status_code=
+                status.HTTP_400_BAD_REQUEST,
+
+            detail=
+                'Invalid or expired QR code',
+        ) from exc
+
+
+    token_type = (
+        payload.get(
+            'type'
         )
+    )
 
 
-    registration_id = payload.get('sub')
+    registration_id = (
+        payload.get(
+            'sub'
+        )
+    )
+
 
     if not registration_id:
         raise HTTPException(
-            status_code=400,
-            detail='Invalid QR payload',
+            status_code=
+                status.HTTP_400_BAD_REQUEST,
+
+            detail=
+                'Invalid QR payload',
         )
 
 
-    # --------------------------------------------------------
-    # Load registration
-    # --------------------------------------------------------
+    # ========================================================
+    # ONLY ACCEPT QR TOKENS
+    # ========================================================
+
+    if token_type not in {
+        'registration_qr',
+        'coordinator_qr',
+    }:
+        raise HTTPException(
+            status_code=
+                status.HTTP_400_BAD_REQUEST,
+
+            detail=
+                'Invalid QR token type',
+        )
+
+
+    # ========================================================
+    # LOAD REGISTRATION
+    # ========================================================
 
     registration = await db.scalar(
-        select(Registration)
+        select(
+            Registration
+        )
         .where(
-            Registration.id ==
-            registration_id
+            Registration.id
+            == registration_id
         )
         .options(
             selectinload(
-                Registration.students
-            ),
-            selectinload(
                 Registration.event_config
+            ),
+
+            selectinload(
+                Registration.ped
             ),
         )
     )
 
 
-    # --------------------------------------------------------
-    # QR validation
-    # --------------------------------------------------------
-
-    if (
-        not registration
-        or registration.qr_token != token
-    ):
+    if not registration:
         raise HTTPException(
-            status_code=404,
-            detail='QR not found or revoked',
+            status_code=
+                status.HTTP_404_NOT_FOUND,
+
+            detail=
+                'Registration not found',
         )
 
 
-    if registration.status != 'APPROVED':
+    # ========================================================
+    # APPROVAL STATUS
+    # ========================================================
+
+    if (
+        registration.status
+        != 'APPROVED'
+    ):
         raise HTTPException(
-            status_code=409,
+            status_code=
+                status.HTTP_409_CONFLICT,
+
             detail=(
                 f'Registration status is '
                 f'{registration.status}'
@@ -364,42 +685,205 @@ async def verify_qr(
         )
 
 
-    # --------------------------------------------------------
-    # Student payload
-    # --------------------------------------------------------
+    # ========================================================
+    # MASTER QR MUST EXIST
+    #
+    # REJECT:
+    # registration.qr_token = None
+    #
+    # REOPEN:
+    # registration.qr_token = None
+    #
+    # Therefore every role-specific QR from that approval
+    # generation becomes invalid.
+    # ========================================================
 
-    students = []
+    if not registration.qr_token:
+        raise HTTPException(
+            status_code=
+                status.HTTP_404_NOT_FOUND,
 
-    for student in registration.students:
-
-        photo_url = await safe_signed_url(
-            settings.SUPABASE_BUCKET_STUDENT_PHOTOS,
-            student.photo_path,
+            detail=
+                'QR not found or revoked',
         )
 
-        students.append({
-            'id':
-                student.id,
 
-            'full_name':
-                student.full_name,
-
-            'photo_url':
-                photo_url,
-
-            'attendance_status':
-                student.attendance_status,
-        })
+    coordinator = None
 
 
-    # --------------------------------------------------------
-    # Event information
-    # --------------------------------------------------------
+    # ========================================================
+    # LEGACY / GENERIC REGISTRATION QR
+    # ========================================================
 
-    event = registration.event_config
+    if token_type == 'registration_qr':
 
+        if not hmac.compare_digest(
+            str(
+                registration.qr_token
+            ),
+            str(
+                token
+            ),
+        ):
+            raise HTTPException(
+                status_code=
+                    status.HTTP_404_NOT_FOUND,
+
+                detail=
+                    'QR not found or revoked',
+            )
+
+
+        # ----------------------------------------------------
+        # Generic registration QR intentionally does NOT
+        # identify the holder as PED / Coach / Manager.
+        # ----------------------------------------------------
+
+        coordinator = None
+
+
+    # ========================================================
+    # COORDINATOR-SPECIFIC QR
+    # ========================================================
+
+    elif token_type == 'coordinator_qr':
+
+        coordinator_role = (
+            str(
+                payload.get(
+                    'coordinator_role'
+                )
+                or ''
+            )
+            .strip()
+            .upper()
+        )
+
+
+        if (
+            coordinator_role
+            not in COORDINATOR_QR_ROLES
+        ):
+            raise HTTPException(
+                status_code=
+                    status.HTTP_400_BAD_REQUEST,
+
+                detail=
+                    'Invalid coordinator QR role',
+            )
+
+
+        # ====================================================
+        # RESOLVE CURRENT ROLE IDENTITY
+        #
+        # This gives us:
+        #
+        # public identity:
+        #     role
+        #     label
+        #     name
+        #
+        # internal identity:
+        #     registered coordinator email
+        #
+        # Email is NEVER exposed to the public response.
+        # ====================================================
+
+        (
+            coordinator,
+            coordinator_email,
+        ) = _coordinator_identity(
+            registration,
+            coordinator_role,
+        )
+
+
+        # ====================================================
+        # VERIFY:
+        #
+        # 1. CURRENT MASTER QR VERSION
+        # 2. CURRENT COORDINATOR IDENTITY
+        #
+        # Example:
+        #
+        # QR issued:
+        # coach1@gmail.com
+        #
+        # Coach later becomes:
+        # coach2@gmail.com
+        #
+        # identity fingerprint mismatch
+        # -> old Coach QR rejected.
+        # ====================================================
+
+        if not coordinator_qr_matches(
+            payload,
+
+            registration.qr_token,
+
+            coordinator_email,
+        ):
+            raise HTTPException(
+                status_code=
+                    status.HTTP_404_NOT_FOUND,
+
+                detail=
+                    (
+                        'Coordinator QR is expired, '
+                        'revoked or no longer belongs '
+                        'to the current coordinator'
+                    ),
+            )
+
+
+    # ========================================================
+    # EVENT
+    # ========================================================
+
+    event = (
+        registration.event_config
+    )
+
+
+    # ========================================================
+    # SAFE PUBLIC COORDINATOR RESPONSE
+    # ========================================================
+
+    coordinator_role = (
+        coordinator.get(
+            'role'
+        )
+        if coordinator
+        else None
+    )
+
+
+    coordinator_label = (
+        coordinator.get(
+            'label'
+        )
+        if coordinator
+        else None
+    )
+
+
+    coordinator_name = (
+        coordinator.get(
+            'name'
+        )
+        if coordinator
+        else None
+    )
+
+
+    # ========================================================
+    # RESPONSE
+    # ========================================================
 
     return {
+        'valid':
+            True,
+
         'registration_id':
             registration.id,
 
@@ -410,36 +894,66 @@ async def verify_qr(
             registration.college_name,
 
         'event':
-            event.sport_name
-            if event
-            else None,
+            (
+                event.sport_name
+                if event
+                else None
+            ),
 
         'event_type':
-            event.event_type
-            if event
-            else None,
+            (
+                event.event_type
+                if event
+                else None
+            ),
 
         'category':
-            event.category
-            if event
-            else None,
+            (
+                event.category
+                if event
+                else None
+            ),
 
-        'student_coordinator_name':
-            registration.student_coordinator_name,
 
-        'student_count':
-            len(students),
+        # ====================================================
+        # ONLY THE ROLE REPRESENTED BY THIS QR
+        # ====================================================
+
+        'coordinator':
+            coordinator,
+
+        'coordinator_role':
+            coordinator_role,
+
+        'coordinator_label':
+            coordinator_label,
+
+        'coordinator_name':
+            coordinator_name,
+
+
+        # ====================================================
+        # ATTENDANCE STATE
+        # ====================================================
 
         'already_checked_in':
-            registration.attendance_confirmed_at
-            is not None,
+            (
+                registration
+                .attendance_confirmed_at
+                is not None
+            ),
 
         'checked_in_at':
-            registration.attendance_confirmed_at,
+            registration
+            .attendance_confirmed_at,
 
-        'students':
-            students,
+
+        # ====================================================
+        # ORIGINAL QR LANDING URL
+        # ====================================================
 
         'qr_url':
-            qr_public_url(token),
+            qr_public_url(
+                token
+            ),
     }
