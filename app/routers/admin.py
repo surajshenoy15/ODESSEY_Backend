@@ -1,3 +1,4 @@
+import logging
 import io
 import mimetypes
 import uuid
@@ -79,6 +80,9 @@ from app.services.helpers import (
 from app.services.storage import storage
 
 
+logger = logging.getLogger(__name__)
+
+
 router = APIRouter(
     prefix='/admin',
     tags=['Admin'],
@@ -95,6 +99,39 @@ IMG_TYPES = {
 # ============================================================
 # HELPERS
 # ============================================================
+
+async def safe_signed_url(
+    bucket: str,
+    path: str | None,
+):
+    """
+    Generate a signed storage URL without allowing one missing
+    or invalid object to break the entire admin detail response.
+
+    Upload/download operations remain strict. This helper is only
+    used when a URL is optional presentation data.
+    """
+
+    if not path:
+        return None
+
+    try:
+        return await storage.signed_url(
+            bucket,
+            path,
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Unable to generate signed URL "
+            "for bucket=%s path=%s error=%s",
+            bucket,
+            path,
+            exc,
+        )
+
+        return None
+
 
 def coordinator_emails(
     ped: Ped | None,
@@ -850,15 +887,11 @@ async def registration_detail(
                 student.certificate_override_reason,
 
             'photo_url':
-                (
-                    await storage.signed_url(
-                        settings
-                        .SUPABASE_BUCKET_STUDENT_PHOTOS,
+                await safe_signed_url(
+                    settings
+                    .SUPABASE_BUCKET_STUDENT_PHOTOS,
 
-                        student.photo_path,
-                    )
-                    if student.photo_path
-                    else None
+                    student.photo_path,
                 ),
         })
 
@@ -990,17 +1023,12 @@ async def registration_detail(
 
 
         'bonafide_url':
-            (
-                await storage.signed_url(
-                    settings
-                    .SUPABASE_BUCKET_BONAFIDES,
+            await safe_signed_url(
+                settings
+                .SUPABASE_BUCKET_BONAFIDES,
 
-                    registration
-                    .bonafide_path,
-                )
-                if registration
-                .bonafide_path
-                else None
+                registration
+                .bonafide_path,
             ),
 
 
