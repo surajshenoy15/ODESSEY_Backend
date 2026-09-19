@@ -1,0 +1,16 @@
+.env
+.env.*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.venv
+venv
+.git
+.gitignore
+
+odyssey.db
+
+storage/
+tests/
