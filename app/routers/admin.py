@@ -1090,6 +1090,9 @@ async def registration_detail(
 # ============================================================
 # REMOVE REGISTRATION (SAFE SOFT DELETE)
 # ============================================================
+# ============================================================
+# REMOVE REGISTRATION (ADMIN SOFT DELETE)
+# ============================================================
 
 @router.delete(
     '/registrations/{rid}',
@@ -1109,16 +1112,22 @@ async def delete_registration(
     ),
 ):
     """
-    Remove a registration from active operations without
-    physically deleting payment/audit history.
+    Remove a registration from active operations.
 
-    The registration is moved to CANCELLED and every current QR
-    is revoked by clearing registration.qr_token.
+    Admin can remove registrations even when attendance
+    or certificate history already exists.
 
-    Registrations that already have attendance or certificates
-    are protected from deletion because those records are part
-    of event-day / certification history.
+    The registration itself is soft-deleted:
+        status = CANCELLED
+        qr_token = None
+
+    Payment, attendance, certificate and audit history
+    are preserved.
     """
+
+    # --------------------------------------------------------
+    # Find registration
+    # --------------------------------------------------------
 
     registration = await db.scalar(
         select(
@@ -1141,6 +1150,14 @@ async def delete_registration(
             detail='Registration is already deleted',
         )
 
+    # --------------------------------------------------------
+    # Existing attendance count
+    #
+    # IMPORTANT:
+    # We only count it for audit purposes.
+    # It DOES NOT block deletion anymore.
+    # --------------------------------------------------------
+
     attendance_count = int(
         await db.scalar(
             select(
@@ -1156,6 +1173,12 @@ async def delete_registration(
         )
         or 0
     )
+
+    # --------------------------------------------------------
+    # Existing certificate count
+    #
+    # Also preserved only for audit/history.
+    # --------------------------------------------------------
 
     certificate_count = int(
         await db.scalar(
@@ -1173,40 +1196,64 @@ async def delete_registration(
         or 0
     )
 
-    if attendance_count or certificate_count:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                'message': (
-                    'This registration cannot be deleted because '
-                    'attendance or certificate history already exists.'
-                ),
-                'attendance_records': attendance_count,
-                'certificates': certificate_count,
-            },
-        )
+    # --------------------------------------------------------
+    # DO NOT BLOCK DELETE
+    # --------------------------------------------------------
+    #
+    # Previously you had:
+    #
+    # if attendance_count or certificate_count:
+    #     raise HTTPException(...)
+    #
+    # That restriction has intentionally been removed.
+    # --------------------------------------------------------
 
-    previous_status = registration.status
+    previous_status = (
+        registration.status
+    )
+
     previous_qr_active = bool(
         registration.qr_token
     )
 
-    registration.status = 'CANCELLED'
+    # --------------------------------------------------------
+    # Soft delete
+    # --------------------------------------------------------
 
-    # Revokes the generic registration QR and every role-specific
-    # PED / Coach / Manager QR derived from the current master.
+    registration.status = (
+        'CANCELLED'
+    )
+
+    # Revoke the main QR.
+    #
+    # Coordinator QR tokens derived from this registration
+    # will also become unusable.
     registration.qr_token = None
 
+    # --------------------------------------------------------
+    # Admin note
+    # --------------------------------------------------------
+
     removal_note = (
-        'Registration removed from active records by admin.'
+        'Registration removed from active records by admin. '
+        'Payment, attendance, certificate and audit history '
+        'have been preserved.'
     )
 
     if registration.admin_note:
         registration.admin_note = (
-            f'{registration.admin_note}\n\n{removal_note}'
+            f'{registration.admin_note}'
+            f'\n\n{removal_note}'
         )
+
     else:
-        registration.admin_note = removal_note
+        registration.admin_note = (
+            removal_note
+        )
+
+    # --------------------------------------------------------
+    # Audit
+    # --------------------------------------------------------
 
     await audit(
         db,
@@ -1216,22 +1263,39 @@ async def delete_registration(
         'REGISTRATION',
         registration.id,
         details={
-            'soft_delete': True,
-            'previous_status': previous_status,
-            'payment_status': registration.payment_status,
-            'qr_revoked': previous_qr_active,
+            'soft_delete':
+                True,
+
+            'previous_status':
+                previous_status,
+
+            'payment_status':
+                registration.payment_status,
+
+            'qr_revoked':
+                previous_qr_active,
+
+            'attendance_records_preserved':
+                attendance_count,
+
+            'certificates_preserved':
+                certificate_count,
         },
     )
+
+    # --------------------------------------------------------
+    # Commit
+    # --------------------------------------------------------
 
     await db.commit()
 
     return MessageResponse(
         message=(
-            'Registration deleted from active records successfully'
+            'Registration deleted from active records successfully. '
+            'Payment, attendance, certificate and audit history '
+            'have been preserved.'
         )
     )
-
-
 # ============================================================
 # APPROVAL EMAILS
 # ============================================================
